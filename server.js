@@ -24,6 +24,8 @@ app.use((req, res, next) => {
 });
 
 const userState = [];
+const messageHistory = []; // Массив для хранения истории сообщений
+
 app.post("/new-user", async (request, response) => {
   if (Object.keys(request.body).length === 0) {
     const result = {
@@ -31,15 +33,19 @@ app.post("/new-user", async (request, response) => {
       message: "This name is already taken!",
     };
     response.status(400).send(JSON.stringify(result)).end();
+    return;
   }
+
   const { name } = request.body;
   const isExist = userState.find((user) => user.name === name);
+
   if (!isExist) {
     const newUser = {
       id: randomUUID(),
       name: name,
     };
     userState.push(newUser);
+
     const result = {
       status: "ok",
       user: newUser,
@@ -51,40 +57,88 @@ app.post("/new-user", async (request, response) => {
       status: "error",
       message: "This name is already taken!",
     };
-    logger.error(`User with name "${name}" already exist`);
+    logger.error(`User with name "${name}" already exists`);
     response.status(409).send(JSON.stringify(result)).end();
   }
 });
 
 const server = http.createServer(app);
 const wsServer = new WebSocketServer({ server });
+
 wsServer.on("connection", (ws) => {
+  // Отправляем историю сообщений новому пользователю
+  ws.send(JSON.stringify({ type: "history", data: messageHistory }));
+
   ws.on("message", (msg, isBinary) => {
     const receivedMSG = JSON.parse(msg);
     logger.info(`Message received: ${JSON.stringify(receivedMSG)}`);
-    // обработка выхода пользователя
+
+    // Обработка события присоединения нового пользователя
+    if (receivedMSG.type === "join") {
+      const { name } = receivedMSG.user;
+      const isExist = userState.find((user) => user.name === name);
+
+      if (!isExist) {
+        userState.push(receivedMSG.user);
+      }
+
+      // Отправляем обновленный список всем клиентам
+      [...wsServer.clients]
+        .filter((o) => o.readyState === WebSocket.OPEN)
+        .forEach((o) => o.send(JSON.stringify(userState)));
+    }
+
+    // Обработка выхода пользователя
     if (receivedMSG.type === "exit") {
       const idx = userState.findIndex(
         (user) => user.name === receivedMSG.user.name
       );
-      userState.splice(idx, 1);
+
+      if (idx !== -1) {
+        userState.splice(idx, 1);
+      }
+
       [...wsServer.clients]
         .filter((o) => o.readyState === WebSocket.OPEN)
         .forEach((o) => o.send(JSON.stringify(userState)));
+
       logger.info(`User with name "${receivedMSG.user.name}" has been deleted`);
       return;
     }
-    // обработка отправки сообщения
+
+    // Обработка отправки сообщения
     if (receivedMSG.type === "send") {
+      // Сохраняем сообщение в истории
+      messageHistory.push(receivedMSG);
+
+      // Отправляем сообщение всем подключенным клиентам
       [...wsServer.clients]
         .filter((o) => o.readyState === WebSocket.OPEN)
         .forEach((o) => o.send(msg, { binary: isBinary }));
+
       logger.info("Message sent to all users");
     }
   });
-  [...wsServer.clients]
-    .filter((o) => o.readyState === WebSocket.OPEN)
-    .forEach((o) => o.send(JSON.stringify(userState)));
+
+  // Удаление пользователя при отключении (разрыв WebSocket-соединения)
+  ws.on("close", () => {
+    const userIndex = userState.findIndex((user) => user.ws === ws);
+
+    if (userIndex !== -1) {
+      const disconnectedUser = userState[userIndex];
+      userState.splice(userIndex, 1);
+
+      // Отправляем обновленный список пользователей всем клиентам
+      [...wsServer.clients]
+        .filter((o) => o.readyState === WebSocket.OPEN)
+        .forEach((o) => o.send(JSON.stringify(userState)));
+
+      logger.info(`User with name "${disconnectedUser.name}" has disconnected`);
+    }
+  });
+
+  // Отправляем текущий список пользователей новому клиенту
+  ws.send(JSON.stringify(userState));
 });
 
 const port = process.env.PORT || 3000;

@@ -25,6 +25,7 @@ app.use((req, res, next) => {
 
 const userState = [];
 const messageHistory = []; // Массив для хранения истории сообщений
+const lastActiveTimes = {}; // Хранение времени последней активности пользователей
 
 app.post("/new-user", async (request, response) => {
   if (Object.keys(request.body).length === 0) {
@@ -73,6 +74,12 @@ wsServer.on("connection", (ws) => {
     const receivedMSG = JSON.parse(msg);
     logger.info(`Message received: ${JSON.stringify(receivedMSG)}`);
 
+    // Обработка пинг-сообщений для обновления времени активности пользователя
+    if (receivedMSG.type === "ping") {
+      lastActiveTimes[receivedMSG.user.name] = Date.now();
+      return;
+    }
+
     // Обработка события присоединения нового пользователя
     if (receivedMSG.type === "join") {
       const { name } = receivedMSG.user;
@@ -80,6 +87,7 @@ wsServer.on("connection", (ws) => {
 
       if (!isExist) {
         userState.push(receivedMSG.user);
+        lastActiveTimes[name] = Date.now(); // Устанавливаем время активности
       }
 
       // Отправляем обновленный список всем клиентам
@@ -96,6 +104,7 @@ wsServer.on("connection", (ws) => {
 
       if (idx !== -1) {
         userState.splice(idx, 1);
+        delete lastActiveTimes[receivedMSG.user.name];
       }
 
       [...wsServer.clients]
@@ -136,6 +145,7 @@ wsServer.on("connection", (ws) => {
     if (userIndex !== -1) {
       const disconnectedUser = userState[userIndex];
       userState.splice(userIndex, 1);
+      delete lastActiveTimes[disconnectedUser.name];
 
       // Отправляем обновленный список пользователей всем клиентам
       [...wsServer.clients]
@@ -146,8 +156,28 @@ wsServer.on("connection", (ws) => {
     }
   });
 
-  // Отправляем текущий список пользователей новому клиенту
-  ws.send(JSON.stringify(userState));
+  // Проверка активности пользователей каждые 30 секунд
+  setInterval(() => {
+    const currentTime = Date.now();
+    userState.forEach((user, index) => {
+      if (
+        lastActiveTimes[user.name] &&
+        currentTime - lastActiveTimes[user.name] > 5000
+      ) {
+        userState.splice(index, 1);
+        delete lastActiveTimes[user.name];
+        broadcastUserState();
+      }
+    });
+  }, 5000);
+
+  function broadcastUserState() {
+    wsServer.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(userState));
+      }
+    });
+  }
 });
 
 const port = process.env.PORT || 3000;

@@ -118,6 +118,15 @@ wsServer.on("connection", (ws) => {
 
       logger.info("Message sent to all users");
     }
+
+    // Обработка запроса на очистку истории
+    if (receivedMSG.type === "clear") {
+      messageHistory.length = 0; // Очистка истории
+      [...wsServer.clients]
+        .filter((o) => o.readyState === WebSocket.OPEN)
+        .forEach((o) => o.send(JSON.stringify({ type: "history", data: [] })));
+      logger.info("Chat history cleared");
+    }
   });
 
   // Удаление пользователя при отключении (разрыв WebSocket-соединения)
